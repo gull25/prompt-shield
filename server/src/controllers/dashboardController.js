@@ -4,37 +4,43 @@ import { handleChatCompletion } from './gatewayController.js';
 
 export const getOverview = async (req, res) => {
   try {
-    const totalRequests = await RequestLog.countDocuments();
-    const cacheHitsCount = await RequestLog.countDocuments({ cacheHit: true });
-    
-    const cacheHitRate = totalRequests > 0 ? ((cacheHitsCount / totalRequests) * 100).toFixed(2) : 0;
-    
-    const stats = await RequestLog.aggregate([
-      {
-        $group: {
-          _id: null,
-          totalCostSavedUSD: { $sum: "$costSavedUSD" },
-          avgHitLatencyMs: {
-            $avg: { $cond: [{ $eq: ["$cacheHit", true] }, "$latencyMs", null] }
-          },
-          avgMissLatencyMs: {
-            $avg: { $cond: [{ $eq: ["$cacheHit", false] }, "$latencyMs", null] }
+    const [statsResult, recentLogs] = await Promise.all([
+      RequestLog.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalRequests: { $sum: 1 },
+            cacheHitsCount: {
+              $sum: { $cond: [{ $eq: ["$cacheHit", true] }, 1, 0] }
+            },
+            totalCostSavedUSD: { $sum: "$costSavedUSD" },
+            avgHitLatencyMs: {
+              $avg: { $cond: [{ $eq: ["$cacheHit", true] }, "$latencyMs", null] }
+            },
+            avgMissLatencyMs: {
+              $avg: { $cond: [{ $eq: ["$cacheHit", false] }, "$latencyMs", null] }
+            }
           }
         }
-      }
+      ]),
+      RequestLog.find().sort({ createdAt: -1 }).limit(12).lean()
     ]);
+
+    const stats = statsResult[0] || {};
+    const totalRequests = stats.totalRequests || 0;
+    const cacheHitsCount = stats.cacheHitsCount || 0;
+    const cacheHitRate = totalRequests > 0 ? ((cacheHitsCount / totalRequests) * 100).toFixed(2) : 0;
 
     const result = {
       totalRequests,
       cacheHits: cacheHitsCount,
       cacheHitRate: parseFloat(cacheHitRate),
-      totalCostSavedUSD: stats[0]?.totalCostSavedUSD || 0,
-      avgHitLatencyMs: stats[0]?.avgHitLatencyMs || 0,
-      avgMissLatencyMs: stats[0]?.avgMissLatencyMs || 0
+      totalCostSavedUSD: stats.totalCostSavedUSD || 0,
+      avgHitLatencyMs: stats.avgHitLatencyMs || 0,
+      avgMissLatencyMs: stats.avgMissLatencyMs || 0
     };
     
     // Generate some chart data based on recent logs (or defaults if empty)
-    const recentLogs = await RequestLog.find().sort({ createdAt: -1 }).limit(12);
     let chartData = [];
     
     if (recentLogs.length < 2) {
@@ -94,12 +100,14 @@ export const getLogs = async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * limit;
 
-    const logs = await RequestLog.find()
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
-      
-    const total = await RequestLog.countDocuments();
+    const [logs, total] = await Promise.all([
+      RequestLog.find()
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      RequestLog.countDocuments()
+    ]);
 
     res.json({
       data: logs,
@@ -117,7 +125,8 @@ export const getCacheEntries = async (req, res) => {
     const entries = await CacheEntry.find()
       .select('-embedding') // Don't send massive vectors to frontend
       .sort({ createdAt: -1 })
-      .limit(50);
+      .limit(50)
+      .lean();
     res.json(entries);
   } catch (error) {
     res.status(500).json({ error: error.message });
